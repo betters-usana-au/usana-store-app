@@ -1,20 +1,35 @@
-
-// 基础的 Service Worker，用于启用 PWA 安装功能
-const CACHE_NAME = 'usana-inv-v1';
+const CACHE_NAME = 'usana-inv-v2';
+const ASSETS = [
+  '/',
+  '/index.html',
+  '/manifest.json'
+];
 
 self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.addAll(ASSETS);
+    })
+  );
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(clients.claim());
+  event.waitUntil(
+    caches.keys().then((keys) => {
+      return Promise.all(
+        keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))
+      );
+    })
+  );
+  self.skipWaiting();
 });
 
-// 必须包含 fetch 事件监听，浏览器才会认为这是可安装的 App
 self.addEventListener('fetch', (event) => {
+  // 优先从网络获取，失败时回退到缓存
   event.respondWith(
     fetch(event.request).catch(() => {
-      return caches.match(event.request);
+      return caches.match(event.request) || caches.match('/');
     })
   );
 });
