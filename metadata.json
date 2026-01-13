@@ -1,0 +1,5 @@
+{
+  "name": "USANA Household Inventory",
+  "description": "A comprehensive home inventory management system for USANA products, featuring automated price list tracking, stock alerts, and usage statistics.",
+  "requestFramePermissions": []
+}
