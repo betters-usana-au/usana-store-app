@@ -1,12 +1,12 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { 
   LayoutDashboard, Package, PlusCircle, MinusCircle, History, 
   AlertTriangle, DollarSign, Search, RefreshCcw, Settings, 
   Trash2, Plus, ChevronDown, Download, Upload, 
   ShieldCheck, LogOut, Users, Key, Database, Link, ExternalLink, Filter, Calendar, Tag, Lock, User, Clock, RotateCcw,
-  Terminal, Info, CheckCircle2, ChevronRight, Menu, X,
-  BarChart as BarChartIcon // 将 Lucide 的 BarChart 重命名以避免冲突
+  Terminal, Info, CheckCircle2, ChevronRight, Menu, X, Cloud, CloudDownload, CloudUpload,
+  BarChart as BarChartIcon
 } from 'lucide-react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, 
@@ -21,12 +21,13 @@ import {
 // ==========================================
 // 当前代码版本定义 (由 AI 维护)
 // ==========================================
-const CURRENT_APP_CODE_VERSION = "2.3.1";
+const CURRENT_APP_CODE_VERSION = "2.4.0";
 const UPDATE_DETAILS = [
-  "修复图标属性错误 (md prop) 导致的 Netlify 构建失败 (v2.3.1)",
-  "解决 Lucide 图标与 Recharts 组件的命名冲突",
-  "进一步加深登录页面字体颜色，确保高对比度可见",
-  "优化移动端底部导航栏阴影及层级，确保在小屏设备上完全可见"
+  "实现真实跨浏览器云端同步：接入 Supabase 后端存储 (Build 2.4.0)",
+  "修复移动端找不到同步按钮的问题：在 Header 右侧新增云端同步快捷键",
+  "优化多设备协作：支持手动拉取云端最新快照，并实现恢复逻辑",
+  "自动拉取逻辑：配置云端后，登录系统将自动尝试同步最新数据",
+  "增强移动端底部导航阴影，防止某些手机系统遮挡内容"
 ];
 
 const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6'];
@@ -56,6 +57,7 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
 
+  // 监听代码版本变更
   useEffect(() => {
     if (globalState.lastKnownCodeVersion !== CURRENT_APP_CODE_VERSION) {
       const newLog: SystemUpdateLog = {
@@ -75,6 +77,138 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('usana_v3_state', JSON.stringify(globalState));
   }, [globalState]);
+
+  const currentUser = globalState.currentUser;
+  const userAccount = currentUser ? globalState.accounts[currentUser] : null;
+  const userStore = currentUser ? globalState.userStore[currentUser] : null;
+  const activeData = userStore?.current;
+  const exchangeRate = activeData?.exchangeRate || 4.6;
+  const inventoryList = activeData ? Object.values(activeData.inventory).sort((a, b) => a.id.localeCompare(b.id)) : [];
+
+  const updateActiveData = (newData: Partial<AppData>) => {
+    if (!currentUser) return;
+    setGlobalState(prev => ({
+      ...prev,
+      userStore: {
+        ...prev.userStore,
+        [currentUser]: {
+          ...prev.userStore[currentUser],
+          current: { ...prev.userStore[currentUser].current, ...newData }
+        }
+      }
+    }));
+  };
+
+  // ==========================================
+  // 云端同步核心逻辑 (Supabase REST API)
+  // ==========================================
+  const performCloudSync = useCallback(async (action: 'push' | 'pull') => {
+    if (!currentUser || !globalState.cloudConfig.supabaseKey) {
+      if (action === 'push') alert('请先在“系统进化史”中配置云端 Anon Key');
+      return;
+    }
+
+    const { supabaseUrl, supabaseKey } = globalState.cloudConfig;
+    const url = `${supabaseUrl}/rest/v1/app_state?username=eq.${currentUser}`;
+    
+    setIsSyncing(true);
+    try {
+      if (action === 'push') {
+        // 保存当前状态到云端
+        const nextVerNum = (userStore?.versionCounter || 1) + 1;
+        const versionTag = `v1.0.${nextVerNum}`;
+        const newSnapshot: DataVersion = {
+          id: Date.now().toString(),
+          versionTag,
+          timestamp: new Date().toLocaleString(),
+          description: `云端同步 (${activeTab})`,
+          data: JSON.parse(JSON.stringify(activeData)),
+          codeVersion: CURRENT_APP_CODE_VERSION
+        };
+
+        const newHistory = [newSnapshot, ...(userStore?.history || [])].slice(0, 10);
+        const payload = {
+          username: currentUser,
+          state: {
+            current: activeData,
+            history: newHistory,
+            versionCounter: nextVerNum
+          },
+          updated_at: new Date().toISOString()
+        };
+
+        const res = await fetch(`${supabaseUrl}/rest/v1/app_state`, {
+          method: 'POST',
+          headers: {
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'resolution=merge-duplicates'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) throw new Error('上传失败');
+
+        // 同步成功后更新本地 history
+        setGlobalState(prev => ({
+          ...prev,
+          userStore: {
+            ...prev.userStore,
+            [currentUser]: {
+              ...prev.userStore[currentUser],
+              history: newHistory,
+              versionCounter: nextVerNum
+            }
+          },
+          cloudConfig: { ...prev.cloudConfig, lastSyncedAt: new Date().toLocaleString(), currentVersion: versionTag }
+        }));
+        
+        if (activeTab !== 'settings') alert(`同步成功！云端版本 ${versionTag}`);
+      } else {
+        // 从云端拉取状态
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`
+          }
+        });
+        
+        if (!res.ok) throw new Error('拉取失败');
+        const data = await res.json();
+        
+        if (data && data.length > 0) {
+          const remoteState = data[0].state;
+          setGlobalState(prev => ({
+            ...prev,
+            userStore: {
+              ...prev.userStore,
+              [currentUser]: remoteState
+            },
+            cloudConfig: { ...prev.cloudConfig, lastSyncedAt: data[0].updated_at }
+          }));
+          if (activeTab === 'settings') alert('已成功拉取云端最新数据快照！');
+        }
+      }
+    } catch (e) {
+      console.error(e);
+      alert('云端同步失败，请检查网络或 Anon Key 是否正确');
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [currentUser, globalState.cloudConfig, activeData, userStore, activeTab]);
+
+  const handleSyncCloud = () => performCloudSync('push');
+  const handleFetchCloud = () => performCloudSync('pull');
+
+  // 登录后自动尝试同步一次
+  useEffect(() => {
+    if (currentUser && globalState.cloudConfig.supabaseKey) {
+       // 仅在首次加载且云端已配置时执行
+       performCloudSync('pull');
+    }
+  }, [currentUser]);
 
   if (!globalState.currentUser) {
     return <AuthScreen 
@@ -103,59 +237,6 @@ export default function App() {
     />;
   }
 
-  const currentUser = globalState.currentUser;
-  const userAccount = globalState.accounts[currentUser];
-  const userStore = globalState.userStore[currentUser];
-  const activeData = userStore.current;
-  const exchangeRate = activeData.exchangeRate || 4.6;
-  const inventoryList = Object.values(activeData.inventory).sort((a, b) => a.id.localeCompare(b.id));
-
-  const updateActiveData = (newData: Partial<AppData>) => {
-    setGlobalState(prev => ({
-      ...prev,
-      userStore: {
-        ...prev.userStore,
-        [currentUser]: {
-          ...prev.userStore[currentUser],
-          current: { ...prev.userStore[currentUser].current, ...newData }
-        }
-      }
-    }));
-  };
-
-  const handleSyncCloud = async () => {
-    if (!globalState.cloudConfig.supabaseKey) {
-      alert('请先配置云端 Key');
-      setActiveTab('settings');
-      return;
-    }
-    setIsSyncing(true);
-    await new Promise(r => setTimeout(r, 1000));
-    const nextVerNum = userStore.versionCounter + 1;
-    const versionTag = `v1.0.${nextVerNum}`;
-    const newSnapshot: DataVersion = {
-      id: Date.now().toString(),
-      versionTag,
-      timestamp: new Date().toLocaleString(),
-      description: `手动同步 (${activeTab})`,
-      data: JSON.parse(JSON.stringify(activeData)),
-      codeVersion: CURRENT_APP_CODE_VERSION
-    };
-    setGlobalState(prev => ({
-      ...prev,
-      userStore: {
-        ...prev.userStore,
-        [currentUser]: {
-          ...prev.userStore[currentUser],
-          history: [newSnapshot, ...prev.userStore[currentUser].history].slice(0, 10),
-          versionCounter: nextVerNum
-        }
-      },
-      cloudConfig: { ...prev.cloudConfig, lastSyncedAt: new Date().toLocaleString(), currentVersion: versionTag }
-    }));
-    setIsSyncing(false);
-  };
-
   const filteredInventory = inventoryList.filter(item => 
     item.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
     item.id.toLowerCase().includes(searchTerm.toLowerCase())
@@ -172,17 +253,19 @@ export default function App() {
             </div>
             <h1 className="text-xl font-black text-slate-800 tracking-tighter">USANA PRO</h1>
           </div>
-          <button onClick={() => setGlobalState(prev => ({...prev, currentUser: undefined}))} className="w-full flex items-center gap-3 p-3 bg-slate-50 rounded-2xl border border-slate-100 hover:border-blue-300 transition-all">
-            <div className={`w-8 h-8 rounded-full ${userAccount.avatarColor} flex items-center justify-center text-white text-[10px] font-black`}>
-              {userAccount.displayName[0]}
+          
+          <button onClick={() => setGlobalState(prev => ({...prev, currentUser: undefined}))} className="w-full flex items-center gap-3 p-3 bg-slate-50 rounded-2xl border border-slate-100 hover:border-blue-300 transition-all group">
+            <div className={`w-8 h-8 rounded-full ${userAccount?.avatarColor} flex items-center justify-center text-white text-[10px] font-black`}>
+              {userAccount?.displayName[0]}
             </div>
-            <div className="text-left">
-              <div className="text-[11px] font-black text-slate-800 truncate">{userAccount.displayName}</div>
-              <div className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">退出系统</div>
+            <div className="text-left overflow-hidden">
+              <div className="text-[11px] font-black text-slate-800 truncate">{userAccount?.displayName}</div>
+              <div className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">退出系统</div>
             </div>
-            <LogOut size={14} className="ml-auto text-slate-300" />
+            <LogOut size={14} className="ml-auto text-slate-300 group-hover:text-rose-500" />
           </button>
         </div>
+        
         <div className="flex-1 px-4 space-y-1">
           <NavItem active={activeTab === 'dash'} onClick={() => setActiveTab('dash')} icon={<LayoutDashboard size={20}/>} label="数据报表" />
           <NavItem active={activeTab === 'inv'} onClick={() => setActiveTab('inv')} icon={<Package size={20}/>} label="库存清单" />
@@ -191,19 +274,20 @@ export default function App() {
           <NavItem active={activeTab === 'hist'} onClick={() => setActiveTab('hist')} icon={<History size={20}/>} label="历史流水" />
           <NavItem active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} icon={<Settings size={20}/>} label="系统进化史" />
         </div>
+
         <div className="p-6 border-t border-slate-50">
            <div className="mb-4 text-center">
               <span className="text-[9px] font-black text-slate-300 uppercase tracking-[0.2em]">Build v{CURRENT_APP_CODE_VERSION}</span>
            </div>
-           <button onClick={handleSyncCloud} disabled={isSyncing} className={`w-full py-4 rounded-2xl flex items-center justify-center gap-2 text-xs font-black uppercase tracking-widest transition-all ${isSyncing ? 'bg-slate-100 text-slate-400' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-100'}`}>
+           <button onClick={handleSyncCloud} disabled={isSyncing} className={`w-full py-4 rounded-2xl flex items-center justify-center gap-2 text-xs font-black uppercase tracking-widest transition-all ${isSyncing ? 'bg-slate-100 text-slate-400' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-xl shadow-blue-100'}`}>
              {isSyncing ? <RefreshCcw size={16} className="animate-spin" /> : <RefreshCcw size={16} />}
-             {isSyncing ? '同步中' : '同步云端'}
+             {isSyncing ? '同步中...' : '同步云端'}
            </button>
         </div>
       </nav>
 
-      {/* 移动端底部导航栏 */}
-      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 z-[100] px-4 py-3 flex justify-between items-center shadow-[0_-8px_20px_rgba(0,0,0,0.08)]">
+      {/* 移动端底部导航栏 - 增强阴影 */}
+      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 z-[100] px-4 py-3 flex justify-between items-center shadow-[0_-12px_32px_rgba(0,0,0,0.12)]">
         <MobileNavItem active={activeTab === 'dash'} onClick={() => setActiveTab('dash')} icon={<LayoutDashboard size={22}/>} label="报表" />
         <MobileNavItem active={activeTab === 'inv'} onClick={() => setActiveTab('inv')} icon={<Package size={22}/>} label="库存" />
         <MobileNavItem active={activeTab === 'in'} onClick={() => setActiveTab('in')} icon={<PlusCircle size={22}/>} label="进货" />
@@ -216,8 +300,8 @@ export default function App() {
         <header className="bg-white/80 backdrop-blur-md border-b border-slate-200 px-6 md:px-10 py-5 sticky top-0 z-50 flex items-center justify-between shadow-sm">
           <div className="flex items-center gap-3 truncate">
              <div className="md:hidden shrink-0">
-               <button onClick={() => setGlobalState(prev => ({...prev, currentUser: undefined}))} className={`w-9 h-9 rounded-xl ${userAccount.avatarColor} flex items-center justify-center text-white text-xs font-black shadow-md`}>
-                  {userAccount.displayName[0]}
+               <button onClick={() => setGlobalState(prev => ({...prev, currentUser: undefined}))} className={`w-9 h-9 rounded-xl ${userAccount?.avatarColor} flex items-center justify-center text-white text-xs font-black shadow-md active:scale-95 transition-all`}>
+                  {userAccount?.displayName[0]}
                </button>
              </div>
              <h2 className="text-xl font-black text-slate-800 tracking-tight uppercase truncate">
@@ -226,15 +310,27 @@ export default function App() {
                 {activeTab === 'in' && 'Inbound'}
                 {activeTab === 'out' && 'Outbound'}
                 {activeTab === 'hist' && 'History'}
-                {activeTab === 'settings' && 'System Logs'}
+                {activeTab === 'settings' && 'Systems History'}
              </h2>
           </div>
-          <div className="flex items-center gap-2">
+          
+          <div className="flex items-center gap-2 md:gap-4">
+             {/* 手机端同步按钮 - 核心修复点 1 */}
+             <div className="md:hidden">
+               <button 
+                 onClick={handleSyncCloud}
+                 disabled={isSyncing}
+                 className={`w-9 h-9 rounded-xl flex items-center justify-center transition-all ${isSyncing ? 'bg-slate-100 text-slate-400' : 'bg-blue-50 text-blue-600 active:bg-blue-600 active:text-white'}`}
+               >
+                 {isSyncing ? <RefreshCcw size={18} className="animate-spin" /> : <CloudUpload size={18} />}
+               </button>
+             </div>
+
              <div className="relative group">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
                 <input 
                   type="text" placeholder="搜索..." 
-                  className="pl-9 pr-3 py-2 bg-slate-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-32 md:w-64 transition-all"
+                  className="pl-9 pr-3 py-2 bg-slate-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-28 md:w-64 transition-all"
                   value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
                 />
              </div>
@@ -242,13 +338,13 @@ export default function App() {
         </header>
 
         <div className="p-4 md:p-10 max-w-7xl mx-auto">
-          {activeTab === 'dash' && <Dashboard inventory={inventoryList} transactions={activeData.transactions} exchangeRate={exchangeRate} />}
+          {activeTab === 'dash' && <Dashboard inventory={inventoryList} transactions={activeData?.transactions || []} exchangeRate={exchangeRate} />}
           {activeTab === 'inv' && <InventoryGrid items={filteredInventory} exchangeRate={exchangeRate} onThresholdUpdate={(id, val) => {
              const nextInv = { ...activeData.inventory };
              nextInv[id] = { ...nextInv[id], threshold: val };
              updateActiveData({ inventory: nextInv });
           }} onDelete={(id) => {
-            if(!confirm('确认移除该产品？')) return;
+            if(!confirm('移除产品？')) return;
             const nextInv = { ...activeData.inventory };
             delete nextInv[id];
             updateActiveData({ inventory: nextInv });
@@ -261,7 +357,7 @@ export default function App() {
             };
             updateActiveData({
               inventory: { ...activeData.inventory, [id]: { ...product, currentPrice: p, stockQuantity: product.stockQuantity + q } },
-              transactions: [newTransaction, ...activeData.transactions]
+              transactions: [newTransaction, ...(activeData?.transactions || [])]
             });
             setActiveTab('inv');
           }} />}
@@ -274,16 +370,43 @@ export default function App() {
             };
             updateActiveData({
               inventory: { ...activeData.inventory, [id]: { ...product, stockQuantity: product.stockQuantity - q } },
-              transactions: [newTransaction, ...activeData.transactions]
+              transactions: [newTransaction, ...(activeData?.transactions || [])]
             });
             setActiveTab('inv');
           }} />}
-          {activeTab === 'hist' && <TransactionHistory transactions={activeData.transactions} />}
+          {activeTab === 'hist' && <TransactionHistory transactions={activeData?.transactions || []} />}
           {activeTab === 'settings' && (
-            <div className="space-y-6">
+            <div className="space-y-6 md:space-y-10">
+              {/* 同步状态看板 */}
+              <div className="bg-white p-6 md:p-10 rounded-3xl shadow-sm border border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                 <div>
+                    <h3 className="text-xl font-black text-slate-800 mb-2 uppercase tracking-tight flex items-center gap-2">
+                       <Cloud className="text-blue-600" /> 云端同步状态
+                    </h3>
+                    <p className="text-xs font-bold text-slate-400">最后同步时间: {globalState.cloudConfig.lastSyncedAt || '从未同步'}</p>
+                 </div>
+                 <div className="flex gap-3">
+                    <button 
+                      onClick={handleFetchCloud}
+                      disabled={isSyncing}
+                      className="flex-1 md:flex-none flex items-center justify-center gap-2 px-6 py-4 bg-slate-900 text-white rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-black transition-all"
+                    >
+                      <CloudDownload size={16} /> 拉取云端数据
+                    </button>
+                    <button 
+                      onClick={handleSyncCloud}
+                      disabled={isSyncing}
+                      className="flex-1 md:flex-none flex items-center justify-center gap-2 px-6 py-4 bg-blue-600 text-white rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-blue-700 shadow-lg shadow-blue-50 transition-all"
+                    >
+                      {isSyncing ? <RefreshCcw size={16} className="animate-spin" /> : <CloudUpload size={16} />}
+                      推送到云端
+                    </button>
+                 </div>
+              </div>
+
               <div className="bg-white p-6 md:p-10 rounded-3xl shadow-sm border border-slate-100">
                 <h3 className="text-xl font-black flex items-center gap-3 text-slate-800 mb-8 uppercase tracking-tight">
-                   <Terminal className="text-blue-600" size={24} /> 系统代码演进日志
+                   <Terminal className="text-blue-600" size={24} /> 系统演进日志
                 </h3>
                 <div className="space-y-6">
                   {globalState.systemLogs.map((log, idx) => (
@@ -294,9 +417,9 @@ export default function App() {
                        <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 z-10 ${idx === 0 ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
                           {idx === 0 ? <CheckCircle2 size={16} /> : <span className="text-[10px] font-black">{log.version.split('.').pop()}</span>}
                        </div>
-                       <div className="flex-1 pb-4 border-b border-slate-50 last:border-none">
+                       <div className="flex-1 pb-4">
                           <div className="flex items-center gap-2 mb-2">
-                             <span className={`text-sm font-black ${idx === 0 ? 'text-blue-600' : 'text-slate-800'}`}>Build {log.version}</span>
+                             <span className={`text-sm font-black ${idx === 0 ? 'text-blue-600' : 'text-slate-500'}`}>Build {log.version}</span>
                              <span className="text-[10px] font-bold text-slate-400">{log.date}</span>
                           </div>
                           <ul className="space-y-1">
@@ -315,26 +438,51 @@ export default function App() {
 
               <div className="bg-white p-6 md:p-10 rounded-3xl shadow-sm border border-slate-100">
                 <h3 className="text-xl font-black flex items-center gap-3 text-slate-800 mb-8 uppercase tracking-tight">
-                  <Clock className="text-blue-600" size={24} /> 云端备份恢复
+                  <Clock className="text-blue-600" size={24} /> 云端快照管理
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {userStore.history.map((ver) => (
-                    <div key={ver.id} className="p-5 bg-slate-50 rounded-2xl border border-slate-100 flex flex-col justify-between">
+                  {userStore?.history.map((ver) => (
+                    <div key={ver.id} className="p-5 bg-slate-50 rounded-2xl border border-slate-100 flex flex-col justify-between group">
                        <div className="mb-4">
                           <div className="flex items-center justify-between mb-1">
                              <span className="font-black text-slate-800 text-base">{ver.versionTag}</span>
-                             <span className="px-2 py-0.5 bg-slate-200 text-slate-600 rounded text-[9px] font-black uppercase">Env v{ver.codeVersion}</span>
+                             <span className="px-2 py-0.5 bg-slate-200 text-slate-600 rounded text-[9px] font-black uppercase">Build v{ver.codeVersion}</span>
                           </div>
-                          <p className="text-[10px] font-bold text-slate-400 uppercase">{ver.timestamp}</p>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{ver.timestamp}</p>
                        </div>
                        <button onClick={() => {
                          if(confirm(`确认为当前账户恢复 ${ver.versionTag} 的数据？`)) {
                            updateActiveData(ver.data);
-                           alert('数据已恢复');
+                           alert('数据已本地恢复，记得同步到云端以更新其他设备');
                          }
                        }} className="w-full py-3 bg-white border border-slate-200 rounded-xl text-[10px] font-black uppercase text-slate-600 hover:bg-slate-900 hover:text-white transition-all shadow-sm">恢复此快照</button>
                     </div>
                   ))}
+                  {(!userStore?.history || userStore.history.length === 0) && (
+                    <div className="col-span-full py-20 text-center text-slate-300 font-bold uppercase tracking-widest text-xs border-2 border-dashed border-slate-100 rounded-3xl">暂无云端备份</div>
+                  )}
+                </div>
+              </div>
+
+              {/* 云端配置项 */}
+              <div className="bg-white p-6 md:p-10 rounded-3xl shadow-sm border border-slate-100">
+                <h3 className="text-xl font-black flex items-center gap-3 text-slate-800 mb-8 uppercase tracking-tight">
+                  <Key className="text-blue-600" size={24} /> 同步凭证配置
+                </h3>
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Supabase Anon Key</label>
+                    <input 
+                      type="password" 
+                      className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl focus:border-blue-500 outline-none font-mono text-sm"
+                      placeholder="输入您的 Supabase Anon Key 以开启云端跨浏览器同步"
+                      value={globalState.cloudConfig.supabaseKey}
+                      onChange={(e) => setGlobalState(prev => ({...prev, cloudConfig: {...prev.cloudConfig, supabaseKey: e.target.value}}))}
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-400 font-medium bg-blue-50 p-3 rounded-xl border border-blue-100 leading-relaxed">
+                    <b>提示:</b> 配置 Key 后，点击“推送”或“拉取”即可实现多台电脑、手机浏览器间的数据同步。
+                  </p>
                 </div>
               </div>
             </div>
