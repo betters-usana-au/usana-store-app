@@ -47,23 +47,45 @@ export interface AppData {
   exchangeRate: number;
 }
 
+export interface DataVersion {
+  id: string;
+  versionTag: string;
+  timestamp: string;
+  description: string;
+  data: AppData;
+  codeVersion: string; // 记录生成此备份时的代码版本
+}
+
+export interface SystemUpdateLog {
+  version: string;
+  date: string;
+  changes: string[];
+}
+
 export interface CloudConfig {
   supabaseUrl: string;
   supabaseKey: string;
   isEnabled: boolean;
   lastSyncedAt?: string;
+  currentVersion: string;
 }
 
-export interface UserProfile {
-  id: string;
-  name: string;
+export interface UserAccount {
+  username: string;
+  passwordHash: string;
+  displayName: string;
   avatarColor: string;
-  lastSync?: string;
 }
 
 export interface GlobalState {
-  currentProfileId: string;
-  profiles: Record<string, UserProfile>;
-  data: Record<string, AppData>;
-  cloudConfig?: CloudConfig;
+  currentUser?: string;
+  accounts: Record<string, UserAccount>;
+  userStore: Record<string, {
+    current: AppData;
+    history: DataVersion[];
+    versionCounter: number;
+  }>;
+  cloudConfig: CloudConfig;
+  lastKnownCodeVersion: string; // 上一次运行的代码版本
+  systemLogs: SystemUpdateLog[]; // 代码版本演进记录
 }
